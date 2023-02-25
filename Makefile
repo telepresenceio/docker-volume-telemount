@@ -21,9 +21,11 @@ MAKEFLAGS += --no-builtin-rules
 # target, mark that target as .PRECIOUS.
 .DELETE_ON_ERROR:
 
+PLUGIN_ARCH ?= $(shell go env GOARCH)
+PLUGIN_ARCH := $(PLUGIN_ARCH)
 PLUGIN_REGISTRY ?= datawire
 PLUGIN_NAME = telemount
-PLUGIN_TAG ?= latest
+PLUGIN_TAG ?= $(PLUGIN_ARCH)
 PLUGIN_FQN = $(PLUGIN_REGISTRY)/$(PLUGIN_NAME)
 PLUGIN_IMAGE = $(PLUGIN_FQN):$(PLUGIN_TAG)
 
@@ -34,23 +36,26 @@ export DOCKER_BUILDKIT := 1
 clean:
 	rm -rf $(BUILD_DIR)
 
-rootfs:
-	docker build -q -t $(PLUGIN_FQN):rootfs .
-	mkdir -p $(BUILD_DIR)/rootfs
-	docker create --name tmp $(PLUGIN_FQN):rootfs
-	docker export tmp | tar -x -C $(BUILD_DIR)/rootfs
+create:
+	docker buildx inspect |grep -q /$(PLUGIN_ARCH) || \
+	docker run --rm --privileged tonistiigi/binfmt --install all
+	rm -rf $(BUILD_DIR)
+	docker buildx build --platform linux/$(PLUGIN_ARCH) --output $(BUILD_DIR)/rootfs .
 	cp config.json $(BUILD_DIR)
-	docker rm -vf tmp
-
-create: rootfs
-	docker plugin rm -f $(PLUGIN_IMAGE) 2> /dev/null || true
+	docker plugin rm --force $(PLUGIN_IMAGE) 2>/dev/null || true
 	docker plugin create $(PLUGIN_IMAGE) $(BUILD_DIR)
 
 enable: create
 	docker plugin enable $(PLUGIN_IMAGE)
 
-push:  clean enable
+push:  clean create
 	docker plugin push $(PLUGIN_IMAGE)
+ifeq ($(PLUGIN_ARCH), amd64)
+	docker plugin rm --force $(PLUGIN_IMAGE) 2>/dev/null || true
+	docker plugin create $(PLUGIN_FQN):latest $(BUILD_DIR)
+	docker plugin push $(PLUGIN_FQN):latest
+endif
+
 
 debug: push
 	docker plugin rm -f $(PLUGIN_IMAGE) 2> /dev/null || true
