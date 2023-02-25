@@ -1,0 +1,9 @@
+.idea/
+.git/
+.github/
+.vscode/
+build-output/
+LICENSE
+Makefile
+README.md
+config.json
