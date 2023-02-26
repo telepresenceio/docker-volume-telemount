@@ -11,11 +11,5 @@ RUN \
     GOOS=$TARGETOS GOARCH=$TARGETARCH go build -o /go/bin/docker-volume-telemount
 
 FROM alpine
-RUN apk update && apk add sshfs
-RUN mkdir -p /run/docker/plugins
-COPY --from=builder /go/bin/docker-volume-telemount .
-# Tini to reap orphaned child procceses
-# Add Tini
-RUN apk add tini
-ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["docker-volume-telemount"]
+RUN apk update && apk add tini sshfs
+COPY --from=builder /go/bin/docker-volume-telemount /bin/

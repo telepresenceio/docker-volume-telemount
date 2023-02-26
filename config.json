@@ -3,7 +3,7 @@
   "documentation": "https://docs.docker.com/engine/extend/plugins/",
   "entrypoint": [
     "/sbin/tini", "--",
-    "/docker-volume-telemount"
+    "/bin/docker-volume-telemount"
   ],
   "env": [
     {
