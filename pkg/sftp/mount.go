@@ -2,7 +2,6 @@ package sftp
 
 import (
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"sync"
@@ -18,17 +17,15 @@ import (
 type mount struct {
 	sync.Mutex
 	mountPoint string
-	hostIP     net.IP
 	port       uint16
 	cmd        *exec.Cmd
 	done       chan error
 	volumes    map[string]*volumeDir
 }
 
-func newMount(mountPoint string, hostIP net.IP, port uint16) *mount {
+func newMount(mountPoint string, port uint16) *mount {
 	return &mount{
 		mountPoint: mountPoint,
-		hostIP:     hostIP,
 		port:       port,
 		volumes:    make(map[string]*volumeDir),
 		done:       make(chan error, 1),
@@ -36,7 +33,7 @@ func newMount(mountPoint string, hostIP net.IP, port uint16) *mount {
 }
 
 func (m *mount) String() string {
-	return fmt.Sprintf("ip=%s, port=%d, mountPoint=%s", m.hostIP, m.port, m.mountPoint)
+	return fmt.Sprintf("port=%d, mountPoint=%s", m.port, m.mountPoint)
 }
 
 func (m *mount) addVolume(name, dir string) {
@@ -92,6 +89,7 @@ func (m *mount) perhapsUnmount() error {
 // telAppExports is the directory where the remote traffic-agent's SFTP server exports the
 // intercepted container's volumes.
 const telAppExports = "/tel_app_exports"
+const mountArg = "localhost:" + telAppExports
 
 func (m *mount) mountVolume() error {
 	err := os.MkdirAll(m.mountPoint, 0o777)
@@ -99,7 +97,7 @@ func (m *mount) mountVolume() error {
 		return log.Errorf("failed to create mountpoint directory %s: %v", m.mountPoint, err)
 	}
 	sshfsArgs := []string{
-		fmt.Sprintf("%s:%s", m.hostIP, telAppExports), // what to mount
+		mountArg,     // what to mount
 		m.mountPoint, // where to mount it
 		"-F", "none", // don't load the user's config file
 		"-f",

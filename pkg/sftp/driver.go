@@ -1,7 +1,6 @@
 package sftp
 
 import (
-	"net"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -17,19 +16,25 @@ import (
 type driver struct {
 	sync.Mutex
 	volumePath   string
-	remoteMounts map[string]*mount
+	remoteMounts map[uint16]*mount
 }
 
+// NewDriver creates a new driver that will mount volumes under /mnt/volumes (which is
+// the propagated-mount directory that Docker assigns for the driver instance).
 func NewDriver() volume.Driver {
 	log.Debug("NewDriver")
 	volumePath := filepath.Join("/mnt", "volumes")
 	d := &driver{
 		volumePath:   volumePath,
-		remoteMounts: make(map[string]*mount),
+		remoteMounts: make(map[uint16]*mount),
 	}
 	return d
 }
 
+// Create creates a new volume with the given options. Volumes with the
+// same ip and port will share the same running sshfs instance. That instance
+// is created on demand when the first volume is mounted and removed when there
+// are no more mounted volumes.
 func (d *driver) Create(r *volume.CreateRequest) error {
 	log.Debugf("Create %s", r.Name)
 	d.Lock()
@@ -37,7 +42,6 @@ func (d *driver) Create(r *volume.CreateRequest) error {
 
 	var container, dir string
 	var port uint16
-	var hostIP net.IP
 	for key, val := range r.Options {
 		switch key {
 		case "container":
@@ -50,17 +54,6 @@ func (d *driver) Create(r *volume.CreateRequest) error {
 			} else {
 				port = uint16(pv)
 			}
-		case "ip":
-			if ip := net.ParseIP(val); ip != nil {
-				if ip4 := ip.To4(); ip4 != nil {
-					hostIP = ip4
-				} else if ip16 := ip.To16(); ip16 != nil {
-					hostIP = ip16
-				}
-			}
-			if hostIP == nil {
-				return log.Errorf("invalid IP %q", val)
-			}
 		default:
 			return log.Errorf("illegal option %q", key)
 		}
@@ -71,15 +64,12 @@ func (d *driver) Create(r *volume.CreateRequest) error {
 	if port == 0 {
 		return log.Errorf("missing required option \"port\"")
 	}
-	if hostIP == nil {
-		return log.Errorf("missing required option \"ip\"")
-	}
 	if dir == "" {
 		dir = container
 	} else {
 		dir = filepath.Join(container, strings.TrimPrefix(dir, "/"))
 	}
-	d.getRemoteMount(hostIP, port).addVolume(r.Name, dir)
+	d.getRemoteMount(port).addVolume(r.Name, dir)
 	return nil
 }
 
@@ -197,22 +187,12 @@ func (d *driver) Capabilities() *volume.CapabilitiesResponse {
 	return &volume.CapabilitiesResponse{Capabilities: volume.Capability{Scope: "local"}}
 }
 
-func makeAddrKey(ip net.IP, port uint16) string {
-	il := len(ip)
-	key := make([]byte, il+2)
-	copy(key, ip)
-	key[il] = byte(port >> 8)
-	key[il+1] = byte(port)
-	return string(key)
-}
-
-func (d *driver) getRemoteMount(ip net.IP, port uint16) *mount {
-	key := makeAddrKey(ip, port)
-	if m, ok := d.remoteMounts[key]; ok {
+func (d *driver) getRemoteMount(port uint16) *mount {
+	if m, ok := d.remoteMounts[port]; ok {
 		return m
 	}
-	m := newMount(filepath.Join(d.volumePath, ip.String(), strconv.Itoa(int(port))), ip, port)
-	d.remoteMounts[key] = m
+	m := newMount(filepath.Join(d.volumePath, strconv.Itoa(int(port))), port)
+	d.remoteMounts[port] = m
 	return m
 }
 
