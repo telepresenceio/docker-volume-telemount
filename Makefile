@@ -23,40 +23,62 @@ MAKEFLAGS += --no-builtin-rules
 
 PLUGIN_ARCH ?= $(shell go env GOARCH)
 PLUGIN_ARCH := $(PLUGIN_ARCH)
-PLUGIN_REGISTRY ?= datawire
+PLUGIN_REGISTRY ?= docker.io/datawire
 PLUGIN_NAME = telemount
-PLUGIN_TAG ?= $(PLUGIN_ARCH)
 PLUGIN_FQN = $(PLUGIN_REGISTRY)/$(PLUGIN_NAME)
-PLUGIN_IMAGE = $(PLUGIN_FQN):$(PLUGIN_TAG)
+PLUGIN_DEV_IMAGE = $(PLUGIN_FQN):$(PLUGIN_ARCH)
 
 BUILD_DIR=build-output
 
 export DOCKER_BUILDKIT := 1
 
+.PHONY: clean
 clean:
 	rm -rf $(BUILD_DIR)
 
-create:
+.PHONY: rootfs
+rootfs:
 	docker buildx inspect |grep -q /$(PLUGIN_ARCH) || \
 	docker run --rm --privileged tonistiigi/binfmt --install all
 	rm -rf $(BUILD_DIR)
 	docker buildx build --platform linux/$(PLUGIN_ARCH) --output $(BUILD_DIR)/rootfs .
 	cp config.json $(BUILD_DIR)
-	docker plugin rm --force $(PLUGIN_IMAGE) 2>/dev/null || true
-	docker plugin create $(PLUGIN_IMAGE) $(BUILD_DIR)
 
-enable: create
-	docker plugin enable $(PLUGIN_IMAGE)
+# Enable is to support faster dev-loop (retries without pushing)
+.PHONY: enable
+enable: rootfs
+	docker plugin rm --force $(PLUGIN_DEV_IMAGE) 2>/dev/null || true
+	docker plugin create $(PLUGIN_DEV_IMAGE) $(BUILD_DIR)
+	docker plugin enable $(PLUGIN_DEV_IMAGE)
 
-push:  clean create
-	docker plugin push $(PLUGIN_IMAGE)
+# Recreate the plugin from the rootfs with some tag. This target is called
+# repeatedly in order to give the plugin different tags (because plugins cannot
+# be tagged like images).
+$(BUILD_DIR)/tag-%.ts:
+	docker plugin rm --force $(PLUGIN_FQN):$* 2>/dev/null || true
+	docker plugin create $(PLUGIN_FQN):$* $(BUILD_DIR)
+	docker plugin push $(PLUGIN_FQN):$*
+	docker plugin rm --force $(PLUGIN_FQN):$* 2>/dev/null || true
+	touch $(BUILD_DIR)/tag-$*.ts
+
+gaPattern = ^[0-9]+.[0-9]+.[0-9]+$$
+
+# For amd64 we push the tags "amd64-SEMVER" and "SEMVER", and if it is a release, also "amd64" and "latest".
+# For arm64 we push the tag "arm64-SEMVER", and if it is a release also "arm64".
+.PHONY: push
 ifeq ($(PLUGIN_ARCH), amd64)
-	docker plugin rm --force $(PLUGIN_IMAGE) 2>/dev/null || true
-	docker plugin create $(PLUGIN_FQN):latest $(BUILD_DIR)
-	docker plugin push $(PLUGIN_FQN):latest
+push:  clean rootfs $(BUILD_DIR)/tag-$(PLUGIN_ARCH)-$(PLUGIN_VERSION).ts $(BUILD_DIR)/tag-$(PLUGIN_VERSION).ts
+else
+push:  clean rootfs $(BUILD_DIR)/tag-$(PLUGIN_ARCH)-$(PLUGIN_VERSION).ts
 endif
+	if [[ $(PLUGIN_VERSION) =~ $(gaPattern) ]]; \
+	then \
+	  make push-latest; \
+	fi
 
-
-debug: push
-	docker plugin rm -f $(PLUGIN_IMAGE) 2> /dev/null || true
-	docker plugin install $(PLUGIN_IMAGE) DEBUG=true
+.PHONY: push-latest
+ifeq ($(PLUGIN_ARCH), amd64)
+push-latest:  $(BUILD_DIR)/tag-$(PLUGIN_ARCH).ts $(BUILD_DIR)/tag-latest.ts
+else
+push-latest:  $(BUILD_DIR)/tag-$(PLUGIN_ARCH).ts
+endif
