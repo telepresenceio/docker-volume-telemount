@@ -1,6 +1,7 @@
 package sftp
 
 import (
+	"net"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -16,7 +17,7 @@ import (
 type driver struct {
 	sync.Mutex
 	volumePath   string
-	remoteMounts map[uint16]*mount
+	remoteMounts map[string]*mount
 }
 
 // NewDriver creates a new driver that will mount volumes under /mnt/volumes (which is
@@ -26,7 +27,7 @@ func NewDriver() volume.Driver {
 	volumePath := filepath.Join("/mnt", "volumes")
 	d := &driver{
 		volumePath:   volumePath,
-		remoteMounts: make(map[uint16]*mount),
+		remoteMounts: make(map[string]*mount),
 	}
 	return d
 }
@@ -40,7 +41,7 @@ func (d *driver) Create(r *volume.CreateRequest) error {
 	d.Lock()
 	defer d.Unlock()
 
-	var container, dir string
+	var container, dir, host string
 	var port uint16
 	for key, val := range r.Options {
 		switch key {
@@ -48,6 +49,8 @@ func (d *driver) Create(r *volume.CreateRequest) error {
 			container = val
 		case "dir":
 			dir = val
+		case "host":
+			host = val
 		case "port":
 			if pv, err := strconv.ParseUint(val, 10, 16); err != nil {
 				return log.Errorf("port must be an unsigned integer between 1 and 65535")
@@ -61,6 +64,9 @@ func (d *driver) Create(r *volume.CreateRequest) error {
 	if container == "" {
 		return log.Errorf("missing required option \"container\"")
 	}
+	if host == "" {
+		host = "localhost"
+	}
 	if port == 0 {
 		return log.Errorf("missing required option \"port\"")
 	}
@@ -69,7 +75,7 @@ func (d *driver) Create(r *volume.CreateRequest) error {
 	} else {
 		dir = filepath.Join(container, strings.TrimPrefix(dir, "/"))
 	}
-	d.getRemoteMount(port).addVolume(r.Name, dir)
+	d.getRemoteMount(host, port).addVolume(r.Name, dir)
 	return nil
 }
 
@@ -187,12 +193,14 @@ func (d *driver) Capabilities() *volume.CapabilitiesResponse {
 	return &volume.CapabilitiesResponse{Capabilities: volume.Capability{Scope: "local"}}
 }
 
-func (d *driver) getRemoteMount(port uint16) *mount {
-	if m, ok := d.remoteMounts[port]; ok {
+func (d *driver) getRemoteMount(host string, port uint16) *mount {
+	ps := strconv.Itoa(int(port))
+	key := net.JoinHostPort(host, ps)
+	if m, ok := d.remoteMounts[key]; ok {
 		return m
 	}
-	m := newMount(filepath.Join(d.volumePath, strconv.Itoa(int(port))), port)
-	d.remoteMounts[port] = m
+	m := newMount(filepath.Join(d.volumePath, host, ps), host, port)
+	d.remoteMounts[key] = m
 	return m
 }
 

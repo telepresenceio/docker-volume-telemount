@@ -17,15 +17,17 @@ import (
 type mount struct {
 	sync.Mutex
 	mountPoint string
+	host       string
 	port       uint16
 	cmd        *exec.Cmd
 	done       chan error
 	volumes    map[string]*volumeDir
 }
 
-func newMount(mountPoint string, port uint16) *mount {
+func newMount(mountPoint, host string, port uint16) *mount {
 	return &mount{
 		mountPoint: mountPoint,
+		host:       host,
 		port:       port,
 		volumes:    make(map[string]*volumeDir),
 		done:       make(chan error, 1),
@@ -97,7 +99,7 @@ func (m *mount) mountVolume() error {
 		return log.Errorf("failed to create mountpoint directory %s: %v", m.mountPoint, err)
 	}
 	sshfsArgs := []string{
-		mountArg,     // what to mount
+		fmt.Sprintf("%s:%s", m.host, telAppExports), // what to mount
 		m.mountPoint, // where to mount it
 		"-F", "none", // don't load the user's config file
 		"-f",
