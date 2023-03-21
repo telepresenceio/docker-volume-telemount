@@ -1,14 +1,23 @@
 # Docker volume plugin for Telepresence
 
-This Docker plugin enables the creation of Docker volumes for remote folders published by a Telepresence traffic-agent
-during intercepts. On macOS and Windows platforms, the volume driver runs in the Docker VM, so no installation of sshfs
-or platform specific FUSE implementations such as macFUSE or WinFSP are needed.
+This Docker plugin enables the creation of Docker volumes for remote folders published by a Telepresence Traffic Agent
+during intercepts.
+
+## Architecture
+
+The plugin is specifically designed to enable remote volumes for the duration of an intercept. It uses an
+[sshfs](https://man7.org/linux/man-pages/man1/sshfs.1.html) client internally and connects to the Traffic Agent's SFTP
+server via a port that is exposed by the Telepresence container based daemon. The port is only reachable from the docker
+internal network.
+
+On macOS and Windows platforms, the volume driver runs in the Docker VM, so no installation of sshfs or a platform specific
+FUSE implementations such as macFUSE or WinFSP are needed. The `sshfs` client is already installed in the Docker VM.
 
 ## Usage
 
 ### Install
 
-The `latest` tag is an alias for `amd64`, so if you are using that architecture, you can install using:
+The `latest` tag is an alias for `amd64`, so if you are using that architecture, you can install it using:
 
 ```console
 $ docker plugin install datawire/telemount --alias telemount
@@ -19,6 +28,7 @@ $ docker plugin install datawire/telemount:arm64 --alias telemount
 ```
 
 ### Intercept and create volumes
+
 Create an intercept. Use `--local-mount-port 1234` to set up a bridge instead of mounting, and `--detailed-ouput --output yaml` so that
 the command outputs the environment in a readable form:
 ```console
