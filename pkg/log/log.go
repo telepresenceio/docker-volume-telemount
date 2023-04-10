@@ -8,7 +8,6 @@
 package log
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -21,23 +20,18 @@ func SetDebug(flag bool) {
 	debug = flag
 }
 
-func Error(v any) error {
+func Error(v any) {
 	switch v := v.(type) {
 	case nil:
-		return nil
 	case error:
 		_, _ = fmt.Fprintln(os.Stderr, v.Error())
-		return v
 	case string:
 		_, _ = fmt.Fprintln(os.Stderr, v)
-		return errors.New(v)
 	case fmt.Stringer:
 		_, _ = fmt.Fprintln(os.Stderr, v)
-		return errors.New(v.String())
 	default:
 		err := fmt.Errorf("%v", v)
 		_, _ = fmt.Fprintln(os.Stderr, err.Error())
-		return err
 	}
 }
 
@@ -45,12 +39,12 @@ func IsDebug() bool {
 	return debug
 }
 
-func Errorf(format string, args ...any) error {
-	return Error(fmt.Errorf(format, args...))
+func Errorf(format string, args ...any) {
+	Error(fmt.Errorf(format, args...))
 }
 
 func Fatal(v any) {
-	_ = Error(v)
+	Error(v)
 	os.Exit(1)
 }
 

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -15,13 +15,13 @@ import (
 
 // mount is shared between volumeMounts.
 type mount struct {
-	sync.Mutex
 	mountPoint string
 	host       string
 	port       uint16
-	cmd        *exec.Cmd
+	mounted    atomic.Bool
 	done       chan error
 	volumes    map[string]*volumeDir
+	proc       *os.Process
 }
 
 func newMount(mountPoint, host string, port uint16) *mount {
@@ -39,47 +39,31 @@ func (m *mount) String() string {
 }
 
 func (m *mount) addVolume(name, dir string) {
-	m.Lock()
 	m.volumes[name] = &volumeDir{
 		mount:     m,
 		remoteDir: dir,
 		createdAt: time.Now(),
 	}
-	m.Unlock()
 }
 
 func (m *mount) getVolume(name string) (*volumeDir, bool) {
-	m.Lock()
 	v, ok := m.volumes[name]
-	m.Unlock()
 	return v, ok
 }
 
 func (m *mount) deleteVolume(name string) error {
-	m.Lock()
-	defer m.Unlock()
 	delete(m.volumes, name)
-	if len(m.volumes) == 0 {
-		return m.unmountVolume()
-	}
 	return nil
 }
 
-func (m *mount) assertMounted(mountIfNotMounted bool) error {
-	m.Lock()
-	defer m.Unlock()
-	if m.cmd != nil {
+func (m *mount) perhapsMount() error {
+	if m.mounted.Load() {
 		return nil
 	}
-	if mountIfNotMounted {
-		return m.mountVolume()
-	}
-	return log.Errorf("%s is not mounted", m)
+	return m.mountVolume()
 }
 
 func (m *mount) perhapsUnmount() error {
-	m.Lock()
-	defer m.Unlock()
 	for _, v := range m.volumes {
 		if len(v.usedBy) > 0 {
 			return nil
@@ -91,12 +75,11 @@ func (m *mount) perhapsUnmount() error {
 // telAppExports is the directory where the remote traffic-agent's SFTP server exports the
 // intercepted container's volumes.
 const telAppExports = "/tel_app_exports"
-const mountArg = "localhost:" + telAppExports
 
 func (m *mount) mountVolume() error {
 	err := os.MkdirAll(m.mountPoint, 0o777)
 	if err != nil {
-		return log.Errorf("failed to create mountpoint directory %s: %v", m.mountPoint, err)
+		return fmt.Errorf("failed to create mountpoint directory %s: %v", m.mountPoint, err)
 	}
 	sshfsArgs := []string{
 		fmt.Sprintf("%s:%s", m.host, telAppExports), // what to mount
@@ -124,27 +107,25 @@ func (m *mount) mountVolume() error {
 	// Die if this process dies
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	log.Infof("mounting %s", m)
+	log.Debugf("mounting %s", m)
 	if err := cmd.Start(); err != nil {
-		return log.Errorf("failed to start sshfs to mount %s: %w", m.mountPoint, err)
+		return fmt.Errorf("failed to start sshfs to mount %s: %w", m.mountPoint, err)
 	}
-	m.cmd = cmd
+	m.proc = cmd.Process
+	m.mounted.Store(true)
 	m.done = done
 	go func() {
 		// The Wait here will always exit with an error status, because that's what happens
 		// when sshfs gets interrupted.
 		err = cmd.Wait()
+		// Restore to unmounted state
+		m.mounted.Store(false)
+		close(done)
 		if err == nil {
 			log.Debug("sshfs exited normally")
 		} else {
-			_ = log.Errorf("sshfs exited with %v", err)
+			log.Errorf("sshfs exited with %v", err)
 		}
-		close(done)
-
-		// Restore to unmounted state
-		m.Lock()
-		m.cmd = nil
-		m.Unlock()
 	}()
 
 	// Let's wait a short while to check if the command errors.
@@ -158,23 +139,23 @@ func (m *mount) mountVolume() error {
 	}
 }
 
-func (m *mount) unmountVolume() error {
+func (m *mount) unmountVolume() (err error) {
 	defer func() {
 		if err := os.RemoveAll(m.mountPoint); err != nil {
-			_ = log.Errorf("failed to remove mountpoint %s: %v", m.mountPoint, err)
+			log.Errorf("failed to remove mountpoint %s: %v", m.mountPoint, err)
 		}
 	}()
 	if err := exec.Command("umount", m.mountPoint).Run(); err != nil {
-		_ = log.Errorf("failed to unmount volumeDir %s: %v", m.mountPoint, err)
+		log.Errorf("failed to unmount volumeDir %s: %v", m.mountPoint, err)
 	}
-	if cmd := m.cmd; cmd != nil {
+	if m.mounted.Load() {
 		log.Debug("kindly asking sshfs to stop")
 		//		_ = cmd.Process.Signal(os.Interrupt)
 		select {
 		case <-m.done:
 		case <-time.After(5 * time.Second):
 			log.Debug("forcing sshfs to stop")
-			_ = cmd.Process.Kill()
+			_ = m.proc.Kill()
 		}
 		return nil
 	}
@@ -182,10 +163,8 @@ func (m *mount) unmountVolume() error {
 }
 
 func (m *mount) appendVolumes(vols []*volume.Volume) []*volume.Volume {
-	m.Lock()
 	for k, v := range m.volumes {
 		vols = append(vols, v.asVolume(k))
 	}
-	m.Unlock()
 	return vols
 }

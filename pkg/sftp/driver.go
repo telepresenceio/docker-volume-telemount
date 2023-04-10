@@ -1,6 +1,7 @@
 package sftp
 
 import (
+	"fmt"
 	"net"
 	"path/filepath"
 	"sort"
@@ -15,9 +16,18 @@ import (
 )
 
 type driver struct {
-	sync.Mutex
+	// All access to the driver is synchronized using this lock
+	sync.RWMutex
 	volumePath   string
 	remoteMounts map[string]*mount
+}
+
+func logResponse(err error, format string, args ...any) {
+	if err == nil {
+		log.Debugf(format, args...)
+	} else {
+		log.Errorf(format+": %v", append(args, err)...)
+	}
 }
 
 // NewDriver creates a new driver that will mount volumes under /mnt/volumes (which is
@@ -36,10 +46,11 @@ func NewDriver() volume.Driver {
 // same ip and port will share the same running sshfs instance. That instance
 // is created on demand when the first volume is mounted and removed when there
 // are no more mounted volumes.
-func (d *driver) Create(r *volume.CreateRequest) error {
-	log.Debugf("Create %s", r.Name)
-	d.Lock()
-	defer d.Unlock()
+func (d *driver) Create(r *volume.CreateRequest) (err error) {
+	log.Debugf("Create %s, %v", r.Name, r)
+	defer func() {
+		logResponse(err, "Create %s return", r.Name)
+	}()
 
 	var container, dir, host string
 	var port uint16
@@ -53,55 +64,66 @@ func (d *driver) Create(r *volume.CreateRequest) error {
 			host = val
 		case "port":
 			if pv, err := strconv.ParseUint(val, 10, 16); err != nil {
-				return log.Errorf("port must be an unsigned integer between 1 and 65535")
+				return fmt.Errorf("port must be an unsigned integer between 1 and 65535")
 			} else {
 				port = uint16(pv)
 			}
 		default:
-			return log.Errorf("illegal option %q", key)
+			return fmt.Errorf("illegal option %q", key)
 		}
 	}
 	if container == "" {
-		return log.Errorf("missing required option \"container\"")
+		return fmt.Errorf("missing required option \"container\"")
 	}
 	if host == "" {
 		host = "localhost"
 	}
 	if port == 0 {
-		return log.Errorf("missing required option \"port\"")
+		return fmt.Errorf("missing required option \"port\"")
 	}
 	if dir == "" {
 		dir = container
 	} else {
 		dir = filepath.Join(container, strings.TrimPrefix(dir, "/"))
 	}
+	d.Lock()
 	d.getRemoteMount(host, port).addVolume(r.Name, dir)
+	d.Unlock()
 	return nil
 }
 
-func (d *driver) Remove(r *volume.RemoveRequest) error {
+func (d *driver) Remove(r *volume.RemoveRequest) (err error) {
 	log.Debugf("Remove %s", r.Name)
+	defer func() {
+		logResponse(err, "Remove %s return", r.Name)
+	}()
 	d.Lock()
 	defer d.Unlock()
 
-	v, err := d.getVolume(r.Name, false)
-	if err != nil {
+	var v *volumeDir
+	if v, err = d.getVolume(r.Name); err != nil {
 		return err
 	}
 	if len(v.usedBy) > 0 {
-		return log.Errorf("volume %s is mounted by containers: %v", r.Name, v.usedBy)
+		err = fmt.Errorf("volume %s is mounted by containers: %v", r.Name, v.usedBy)
+	} else {
+		err = v.deleteVolume(r.Name)
 	}
-	return v.deleteVolume(r.Name)
+	return err
 }
 
-func (d *driver) Mount(r *volume.MountRequest) (*volume.MountResponse, error) {
+func (d *driver) Mount(r *volume.MountRequest) (mr *volume.MountResponse, err error) {
 	log.Debugf("Mount %s", r.Name)
+	mr = &volume.MountResponse{}
+	defer func() {
+		logResponse(err, "Mount %s return %s", r.Name, mr.Mountpoint)
+	}()
 	d.Lock()
 	defer d.Unlock()
 
-	v, err := d.getVolume(r.Name, true)
-	if err != nil {
-		return nil, err
+	var v *volumeDir
+	if v, err = d.getMountedVolume(r.Name); err != nil {
+		return mr, err
 	}
 	if len(v.usedBy) == 0 {
 		v.usedBy = []string{r.ID}
@@ -118,28 +140,38 @@ func (d *driver) Mount(r *volume.MountRequest) (*volume.MountResponse, error) {
 			v.usedBy = append(v.usedBy, r.ID)
 		}
 	}
-	return &volume.MountResponse{Mountpoint: v.logicalMountPoint()}, nil
+	mr.Mountpoint = v.logicalMountPoint()
+	return mr, nil
 }
 
 func (d *driver) Path(r *volume.PathRequest) (*volume.PathResponse, error) {
 	log.Debugf("Path %s", r.Name)
-	d.Lock()
-	v, err := d.getVolume(r.Name, false)
-	d.Unlock()
-	if err != nil {
-		return nil, err
+	d.RLock()
+	v, err := d.getVolume(r.Name)
+	d.RUnlock()
+	pr := &volume.PathResponse{}
+	if err == nil {
+		pr.Mountpoint = v.logicalMountPoint()
 	}
-	return &volume.PathResponse{Mountpoint: v.logicalMountPoint()}, nil
+	logResponse(err, "Path %s return %s", r.Name, pr.Mountpoint)
+	return pr, err
 }
 
-func (d *driver) Unmount(r *volume.UnmountRequest) error {
+func (d *driver) Unmount(r *volume.UnmountRequest) (err error) {
 	log.Debugf("Unmount %s", r.Name)
+	defer func() {
+		logResponse(err, "Unmount %s return", r.Name)
+	}()
 	d.Lock()
 	defer d.Unlock()
 
-	v, err := d.getVolume(r.Name, false)
+	var v *volumeDir
+	v, err = d.getVolume(r.Name)
 	if err != nil {
 		return err
+	}
+	if v == nil {
+		return nil
 	}
 	found := false
 	for i, id := range v.usedBy {
@@ -156,36 +188,39 @@ func (d *driver) Unmount(r *volume.UnmountRequest) error {
 		}
 	}
 	if !found {
-		return log.Errorf("container %s has no mount for volume %s", r.ID, r.Name)
+		return fmt.Errorf("container %s has no mount for volume %s", r.ID, r.Name)
 	}
 	if len(v.usedBy) == 0 {
-		return v.mount.perhapsUnmount()
+		return v.perhapsUnmount()
 	}
 	return nil
 }
 
-func (d *driver) Get(r *volume.GetRequest) (*volume.GetResponse, error) {
+func (d *driver) Get(r *volume.GetRequest) (gr *volume.GetResponse, err error) {
 	log.Debugf("Get %s", r.Name)
-	d.Lock()
-	v, err := d.getVolume(r.Name, false)
-	d.Unlock()
-	if err != nil {
-		return nil, err
+	gr = &volume.GetResponse{}
+	d.RLock()
+	v, err := d.getVolume(r.Name)
+	if err == nil {
+		gr.Volume = v.asVolume(r.Name)
 	}
-	return &volume.GetResponse{Volume: v.asVolume(r.Name)}, nil
+	d.RUnlock()
+	logResponse(err, "Get %s return %v", r.Name, gr.Volume)
+	return gr, err
 }
 
 func (d *driver) List() (*volume.ListResponse, error) {
 	log.Debug("List")
-	d.Lock()
+	d.RLock()
 	var vols = make([]*volume.Volume, 0, 32)
 	for _, m := range d.remoteMounts {
 		vols = m.appendVolumes(vols)
 	}
-	d.Unlock()
+	d.RUnlock()
 	sort.Slice(vols, func(i, j int) bool {
 		return vols[i].Name < vols[j].Name
 	})
+	log.Debugf("List return %v", vols)
 	return &volume.ListResponse{Volumes: vols}, nil
 }
 
@@ -204,12 +239,24 @@ func (d *driver) getRemoteMount(host string, port uint16) *mount {
 	return m
 }
 
-func (d *driver) getVolume(n string, mounted bool) (*volumeDir, error) {
+func (d *driver) getVolume(n string) (*volumeDir, error) {
 	for _, m := range d.remoteMounts {
 		if v, ok := m.getVolume(n); ok {
-			_ = m.assertMounted(mounted)
 			return v, nil
 		}
 	}
-	return nil, log.Errorf("no such volume: %q", n)
+	return nil, fmt.Errorf("no such volume: %q", n)
+}
+
+func (d *driver) getMountedVolume(n string) (*volumeDir, error) {
+	for _, m := range d.remoteMounts {
+		if v, ok := m.getVolume(n); ok {
+			if err := m.perhapsMount(); err != nil {
+				return v, err
+			}
+			v.mount = m
+			return v, nil
+		}
+	}
+	return nil, fmt.Errorf("no such volume: %q", n)
 }
