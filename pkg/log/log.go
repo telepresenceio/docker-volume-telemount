@@ -49,11 +49,11 @@ func Fatal(v any) {
 }
 
 func Info(v any) {
-	_, _ = fmt.Fprintln(os.Stdout, v)
+	_, _ = fmt.Fprintln(os.Stderr, v)
 }
 
 func Infof(format string, args ...any) {
-	fprintfln(os.Stdout, format, args...)
+	fprintfln(os.Stderr, format, args...)
 }
 
 func Debug(v any) {

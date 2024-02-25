@@ -32,7 +32,8 @@ $ docker plugin install datawire/telemount:arm64 --alias telemount
 Create an intercept. Use `--local-mount-port 1234` to set up a bridge instead of mounting, and `--detailed-ouput --output yaml` so that
 the command outputs the environment in a readable form:
 ```console
-$ telepresence intercept --local-mount-port 1234  --port 8080 --http-header who=me --detailed-output --output yaml echo-easy
+$ telepresence connect
+$ telepresence intercept --local-mount-port 1234  --port 8080 --detailed-output --output yaml echo-easy
 ...
     TELEPRESENCE_CONTAINER: echo-easy
     TELEPRESENCE_MOUNTS: /var/run/secrets/kubernetes.io
@@ -51,6 +52,21 @@ namespace
 token
 ```
 
+## Debugging
+
+Start by building the plugin for debugging. This command both builds and enables the plugin:
+```console
+$ make debug
+```
+
+Figure out the ID of the plugin:
+```console
+$ PLUGIN_ID=`docker plugin inspect -f='{{json .Id}}' datawire/telemount:amd64 | xargs`
+```
+and start viewing what it prints on stderr. All logging goes to stderr:
+```
+$ sudo cat /run/docker/plugins/$PLUGIN_ID/$PLUGIN_ID-stderr
+```
 ## Credits
 To the [Rclone project](https://github.com/rclone/rclone) project and [PR 5668](https://github.com/rclone/rclone/pull/5668)
 specifically for showing a good way to create multi-arch plugins.

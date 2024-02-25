@@ -17,7 +17,7 @@ import (
 
 type driver struct {
 	// All access to the driver is synchronized using this lock
-	sync.RWMutex
+	lock         sync.RWMutex
 	volumePath   string
 	remoteMounts map[string]*mount
 }
@@ -86,9 +86,13 @@ func (d *driver) Create(r *volume.CreateRequest) (err error) {
 	} else {
 		dir = filepath.Join(container, strings.TrimPrefix(dir, "/"))
 	}
-	d.Lock()
-	d.getRemoteMount(host, port).addVolume(r.Name, dir)
-	d.Unlock()
+	d.lock.Lock()
+	defer d.lock.Unlock()
+	m, err := d.getRemoteMount(host, port)
+	if err != nil {
+		return err
+	}
+	m.addVolume(r.Name, dir)
 	return nil
 }
 
@@ -97,8 +101,8 @@ func (d *driver) Remove(r *volume.RemoveRequest) (err error) {
 	defer func() {
 		logResponse(err, "Remove %s return", r.Name)
 	}()
-	d.Lock()
-	defer d.Unlock()
+	d.lock.Lock()
+	defer d.lock.Unlock()
 
 	var v *volumeDir
 	if v, err = d.getVolume(r.Name); err != nil {
@@ -118,8 +122,8 @@ func (d *driver) Mount(r *volume.MountRequest) (mr *volume.MountResponse, err er
 	defer func() {
 		logResponse(err, "Mount %s return %s", r.Name, mr.Mountpoint)
 	}()
-	d.Lock()
-	defer d.Unlock()
+	d.lock.Lock()
+	defer d.lock.Unlock()
 
 	var v *volumeDir
 	if v, err = d.getMountedVolume(r.Name); err != nil {
@@ -146,9 +150,9 @@ func (d *driver) Mount(r *volume.MountRequest) (mr *volume.MountResponse, err er
 
 func (d *driver) Path(r *volume.PathRequest) (*volume.PathResponse, error) {
 	log.Debugf("Path %s", r.Name)
-	d.RLock()
+	d.lock.RLock()
 	v, err := d.getVolume(r.Name)
-	d.RUnlock()
+	d.lock.RUnlock()
 	pr := &volume.PathResponse{}
 	if err == nil {
 		pr.Mountpoint = v.logicalMountPoint()
@@ -162,8 +166,8 @@ func (d *driver) Unmount(r *volume.UnmountRequest) (err error) {
 	defer func() {
 		logResponse(err, "Unmount %s return", r.Name)
 	}()
-	d.Lock()
-	defer d.Unlock()
+	d.lock.Lock()
+	defer d.lock.Unlock()
 
 	var v *volumeDir
 	v, err = d.getVolume(r.Name)
@@ -199,24 +203,24 @@ func (d *driver) Unmount(r *volume.UnmountRequest) (err error) {
 func (d *driver) Get(r *volume.GetRequest) (gr *volume.GetResponse, err error) {
 	log.Debugf("Get %s", r.Name)
 	gr = &volume.GetResponse{}
-	d.RLock()
+	d.lock.RLock()
 	v, err := d.getVolume(r.Name)
 	if err == nil {
 		gr.Volume = v.asVolume(r.Name)
 	}
-	d.RUnlock()
+	d.lock.RUnlock()
 	logResponse(err, "Get %s return %v", r.Name, gr.Volume)
 	return gr, err
 }
 
 func (d *driver) List() (*volume.ListResponse, error) {
 	log.Debug("List")
-	d.RLock()
+	d.lock.RLock()
 	var vols = make([]*volume.Volume, 0, 32)
 	for _, m := range d.remoteMounts {
 		vols = m.appendVolumes(vols)
 	}
-	d.RUnlock()
+	d.lock.RUnlock()
 	sort.Slice(vols, func(i, j int) bool {
 		return vols[i].Name < vols[j].Name
 	})
@@ -228,15 +232,18 @@ func (d *driver) Capabilities() *volume.CapabilitiesResponse {
 	return &volume.CapabilitiesResponse{Capabilities: volume.Capability{Scope: "local"}}
 }
 
-func (d *driver) getRemoteMount(host string, port uint16) *mount {
+func (d *driver) getRemoteMount(host string, port uint16) (*mount, error) {
 	ps := strconv.Itoa(int(port))
 	key := net.JoinHostPort(host, ps)
 	if m, ok := d.remoteMounts[key]; ok {
-		return m
+		return m, nil
 	}
 	m := newMount(filepath.Join(d.volumePath, host, ps), host, port)
+	if err := m.mountVolume(); err != nil {
+		return nil, err
+	}
 	d.remoteMounts[key] = m
-	return m
+	return m, nil
 }
 
 func (d *driver) getVolume(n string) (*volumeDir, error) {
