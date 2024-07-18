@@ -96,6 +96,7 @@ func (m *mount) mountVolume() error {
 
 		// mount directives
 		"-o", "follow_symlinks",
+		"-o", "auto_unmount",
 		"-o", "allow_root", // needed to make --docker-run work as docker runs as root
 	}
 
@@ -164,15 +165,6 @@ func (m *mount) sshfsWait(cmd *exec.Cmd, starting *atomic.Bool) {
 			m.done <- err
 		}
 	}
-	m.mounted.Store(false)
-
-	// sshfs sometimes leave the mount point in a bad state. This will clean it up
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	go func() {
-		defer cancel()
-		_ = exec.Command("fusermount", "-uz", m.mountPoint).Run()
-	}()
-	<-ctx.Done()
 }
 
 func (m *mount) detectSshfsStarted(ctx context.Context, st *unix.Stat_t) error {
