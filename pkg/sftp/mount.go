@@ -98,13 +98,19 @@ func (m *mount) mountVolume() error {
 		"-o", "follow_symlinks",
 		"-o", "allow_root", // needed to make --docker-run work as docker runs as root
 	}
+
+	var sl io.Writer
 	if log.IsDebug() {
 		sshfsArgs = append(sshfsArgs, "-d")
+		sl = log.Stdlog("debug")
+	} else {
+		sl = log.Stdlog("info")
 	}
 	exe := "sshfs"
 	cmd := exec.Command(exe, sshfsArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	log.Debug(cmd)
+	cmd.Stdout = sl
+	cmd.Stderr = sl
 
 	ctx := context.Background()
 

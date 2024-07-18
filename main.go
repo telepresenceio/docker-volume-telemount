@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"strconv"
 
@@ -17,6 +18,9 @@ func main() {
 		ok, _ = strconv.ParseBool(debug)
 		log.SetDebug(ok)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	log.Start(ctx.Done())
 
 	if err := volume.NewHandler(sftp.NewDriver()).ServeUnix(pluginSocket, 0); err != nil {
 		log.Fatal(err)
