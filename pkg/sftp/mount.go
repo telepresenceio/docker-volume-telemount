@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"sync/atomic"
@@ -18,6 +19,7 @@ import (
 
 // mount is shared between volumeMounts.
 type mount struct {
+	cancel     context.CancelFunc
 	mountPoint string
 	host       string
 	port       uint16
@@ -27,12 +29,13 @@ type mount struct {
 	proc       *os.Process
 }
 
-func newMount(mountPoint, host string, port uint16) *mount {
+func newMount(mountPoint, host string, port uint16, cancel context.CancelFunc) *mount {
 	return &mount{
 		mountPoint: mountPoint,
 		host:       host,
 		port:       port,
 		volumes:    make(map[string]*volumeDir),
+		cancel:     cancel,
 	}
 }
 
@@ -96,15 +99,22 @@ func (m *mount) mountVolume() error {
 
 		// mount directives
 		"-o", "follow_symlinks",
+		"-o", "auto_unmount",
 		"-o", "allow_root", // needed to make --docker-run work as docker runs as root
 	}
+
+	var sl io.Writer
 	if log.IsDebug() {
 		sshfsArgs = append(sshfsArgs, "-d")
+		sl = log.Stdlog("debug")
+	} else {
+		sl = log.Stdlog("info")
 	}
 	exe := "sshfs"
 	cmd := exec.Command(exe, sshfsArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	log.Debug(cmd)
+	cmd.Stdout = sl
+	cmd.Stderr = sl
 
 	ctx := context.Background()
 
@@ -115,11 +125,12 @@ func (m *mount) mountVolume() error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	log.Debugf("mounting %s", m)
+	m.mounted.Store(true)
 	if err := cmd.Start(); err != nil {
+		m.mounted.Store(false)
 		return fmt.Errorf("failed to start sshfs to mount %s: %w", m.mountPoint, err)
 	}
 	m.proc = cmd.Process
-	m.mounted.Store(true)
 
 	m.done = make(chan error, 2)
 	starting := atomic.Bool{}
@@ -139,6 +150,8 @@ func (m *mount) mountVolume() error {
 func (m *mount) sshfsWait(cmd *exec.Cmd, starting *atomic.Bool) {
 	defer close(m.done)
 	err := cmd.Wait()
+	m.cancel()
+	m.mounted.Store(false)
 	if err != nil {
 		var ex *exec.ExitError
 		if errors.As(err, &ex) {
@@ -152,21 +165,11 @@ func (m *mount) sshfsWait(cmd *exec.Cmd, starting *atomic.Bool) {
 	}
 
 	// Restore to unmounted state
-	m.mounted.Store(false)
 	if starting.Swap(false) {
 		if err != nil {
 			m.done <- err
 		}
 	}
-	m.mounted.Store(false)
-
-	// sshfs sometimes leave the mount point in a bad state. This will clean it up
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	go func() {
-		defer cancel()
-		_ = exec.Command("fusermount", "-uz", m.mountPoint).Run()
-	}()
-	<-ctx.Done()
 }
 
 func (m *mount) detectSshfsStarted(ctx context.Context, st *unix.Stat_t) error {
@@ -238,6 +241,8 @@ func (m *mount) unmountVolume() (err error) {
 			log.Debug("forcing sshfs to stop")
 			_ = m.proc.Kill()
 		}
+	} else {
+		log.Debugf("sshfs on %s is not running", m.mountPoint)
 	}
 	return err
 }
