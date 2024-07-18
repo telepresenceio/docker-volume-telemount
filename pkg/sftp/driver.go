@@ -238,7 +238,11 @@ func (d *driver) getRemoteMount(host string, port uint16) (*mount, error) {
 	if m, ok := d.remoteMounts[key]; ok {
 		return m, nil
 	}
-	m := newMount(filepath.Join(d.volumePath, host, ps), host, port)
+	m := newMount(filepath.Join(d.volumePath, host, ps), host, port, func() {
+		d.lock.Lock()
+		delete(d.remoteMounts, key)
+		d.lock.Unlock()
+	})
 	if err := m.mountVolume(); err != nil {
 		return nil, err
 	}

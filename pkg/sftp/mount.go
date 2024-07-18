@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"sync/atomic"
@@ -18,6 +19,7 @@ import (
 
 // mount is shared between volumeMounts.
 type mount struct {
+	cancel     context.CancelFunc
 	mountPoint string
 	host       string
 	port       uint16
@@ -27,12 +29,13 @@ type mount struct {
 	proc       *os.Process
 }
 
-func newMount(mountPoint, host string, port uint16) *mount {
+func newMount(mountPoint, host string, port uint16, cancel context.CancelFunc) *mount {
 	return &mount{
 		mountPoint: mountPoint,
 		host:       host,
 		port:       port,
 		volumes:    make(map[string]*volumeDir),
+		cancel:     cancel,
 	}
 }
 
@@ -122,11 +125,12 @@ func (m *mount) mountVolume() error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	log.Debugf("mounting %s", m)
+	m.mounted.Store(true)
 	if err := cmd.Start(); err != nil {
+		m.mounted.Store(false)
 		return fmt.Errorf("failed to start sshfs to mount %s: %w", m.mountPoint, err)
 	}
 	m.proc = cmd.Process
-	m.mounted.Store(true)
 
 	m.done = make(chan error, 2)
 	starting := atomic.Bool{}
@@ -146,6 +150,8 @@ func (m *mount) mountVolume() error {
 func (m *mount) sshfsWait(cmd *exec.Cmd, starting *atomic.Bool) {
 	defer close(m.done)
 	err := cmd.Wait()
+	m.cancel()
+	m.mounted.Store(false)
 	if err != nil {
 		var ex *exec.ExitError
 		if errors.As(err, &ex) {
@@ -159,7 +165,6 @@ func (m *mount) sshfsWait(cmd *exec.Cmd, starting *atomic.Bool) {
 	}
 
 	// Restore to unmounted state
-	m.mounted.Store(false)
 	if starting.Swap(false) {
 		if err != nil {
 			m.done <- err
@@ -236,6 +241,8 @@ func (m *mount) unmountVolume() (err error) {
 			log.Debug("forcing sshfs to stop")
 			_ = m.proc.Kill()
 		}
+	} else {
+		log.Debugf("sshfs on %s is not running", m.mountPoint)
 	}
 	return err
 }
