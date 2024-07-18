@@ -53,10 +53,10 @@ enable: rootfs
 
 .PHONY: debug
 debug: rootfs
-	docker plugin rm --force $(PLUGIN_DEV_IMAGE) 2>/dev/null || true
-	docker plugin create $(PLUGIN_DEV_IMAGE) $(BUILD_DIR)
-	docker plugin set $(PLUGIN_DEV_IMAGE) DEBUG=true
-	docker plugin enable $(PLUGIN_DEV_IMAGE)
+	docker plugin rm --force $(PLUGIN_DEV_IMAGE)-debug 2>/dev/null || true
+	docker plugin create $(PLUGIN_DEV_IMAGE)-debug $(BUILD_DIR)
+	docker plugin set $(PLUGIN_DEV_IMAGE)-debug DEBUG=true
+	docker plugin enable $(PLUGIN_DEV_IMAGE)-debug
 
 # Recreate the plugin from the rootfs with some tag. This target is called
 # repeatedly in order to give the plugin different tags (because plugins cannot
