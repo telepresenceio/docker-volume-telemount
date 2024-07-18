@@ -29,6 +29,14 @@ $ docker plugin install datawire/telemount:arm64 --alias telemount
 
 ### Intercept and create volumes
 
+Connect in docker mode and then intercept with `--docker-run`. The mounts will automatically use this plugin:
+```
+$ telepresence connect --docker
+$ telepresence intercept echo-easy --docker-run -- busybox ls ls /var/run/secrets/kubernetes.io/serviceaccount
+```
+
+#### More detailed (not using --docker and --docker-run)
+
 Create an intercept. Use `--local-mount-port 1234` to set up a bridge instead of mounting, and `--detailed-ouput --output yaml` so that
 the command outputs the environment in a readable form:
 ```console
@@ -54,7 +62,16 @@ token
 
 ## Debugging
 
-Start by building the plugin for debugging. This command both builds and enables the plugin:
+Start by configuring telepresence to not check for the latest version of the plugin, but instead use our debug version by
+adding the following yaml to the `config.yml` (on Linux, this will be in `~/.config/telepresence/config.yml`, and on mac
+you'll find it in `"$HOME/Library/Application Support/telepresence/config.yml"`:
+```yaml
+intercept:
+  telemount:
+    tag: debug
+```
+
+Build the plugin for debugging. The command both builds and enables the plugin:
 ```console
 $ make debug
 ```
@@ -67,6 +84,9 @@ and start viewing what it prints on stderr. All logging goes to stderr:
 ```
 $ sudo cat /run/docker/plugins/$PLUGIN_ID/$PLUGIN_ID-stderr
 ```
+
+Now connect telepresence with `--docker` and do an intercept with `--docker-run`.
+
 ## Credits
 To the [Rclone project](https://github.com/rclone/rclone) project and [PR 5668](https://github.com/rclone/rclone/pull/5668)
 specifically for showing a good way to create multi-arch plugins.
