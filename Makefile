@@ -23,7 +23,7 @@ MAKEFLAGS += --no-builtin-rules
 
 PLUGIN_ARCH ?= $(shell go env GOARCH)
 PLUGIN_ARCH := $(PLUGIN_ARCH)
-PLUGIN_REGISTRY ?= docker.io/datawire
+PLUGIN_REGISTRY ?= ghcr.io/telepresenceio
 PLUGIN_NAME = telemount
 PLUGIN_FQN = $(PLUGIN_REGISTRY)/$(PLUGIN_NAME)
 PLUGIN_DEV_IMAGE = $(PLUGIN_FQN):$(PLUGIN_ARCH)

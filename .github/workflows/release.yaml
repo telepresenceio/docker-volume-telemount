@@ -25,5 +25,5 @@ jobs:
           PLUGIN_ARCH: ${{ matrix.architecture }}
           VER: ${{ github.ref }}
         run: |
-          echo '${{ secrets.DOCKERHUB_PASSWORD }}' | docker login -u='${{ secrets.DOCKERHUB_USERNAME }}' --password-stdin
+          echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u='${{ github.actor }}' --password-stdin
           PLUGIN_VERSION=${VER#refs/tags/v} make push
