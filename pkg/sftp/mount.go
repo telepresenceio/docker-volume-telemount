@@ -23,24 +23,26 @@ type mount struct {
 	mountPoint string
 	host       string
 	port       uint16
+	readOnly   bool
 	mounted    atomic.Bool
 	done       chan error
 	volumes    map[string]*volumeDir
 	proc       *os.Process
 }
 
-func newMount(mountPoint, host string, port uint16, cancel context.CancelFunc) *mount {
+func newMount(mountPoint, host string, port uint16, readOnly bool, cancel context.CancelFunc) *mount {
 	return &mount{
 		mountPoint: mountPoint,
 		host:       host,
 		port:       port,
+		readOnly:   readOnly,
 		volumes:    make(map[string]*volumeDir),
 		cancel:     cancel,
 	}
 }
 
 func (m *mount) String() string {
-	return fmt.Sprintf("port=%d, mountPoint=%s", m.port, m.mountPoint)
+	return fmt.Sprintf("port=%d, mountPoint=%s, readOnly=%t", m.port, m.mountPoint, m.readOnly)
 }
 
 func (m *mount) addVolume(name, dir string) {
@@ -101,6 +103,9 @@ func (m *mount) mountVolume() error {
 		"-o", "follow_symlinks",
 		"-o", "auto_unmount",
 		"-o", "allow_root", // needed to make --docker-run work as docker runs as root
+	}
+	if m.readOnly {
+		sshfsArgs = append(sshfsArgs, "-o", "ro")
 	}
 
 	var sl io.Writer

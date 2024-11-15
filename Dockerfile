@@ -1,7 +1,7 @@
-FROM --platform=$BUILDPLATFORM golang:alpine as builder
+FROM --platform=$BUILDPLATFORM golang:alpine AS builder
 
 RUN apk add --no-cache --virtual .build-deps gcc libc-dev
-WORKDIR docker-volume-telemount
+WORKDIR /docker-volume-telemount
 COPY . .
 ARG TARGETOS
 ARG TARGETARCH
