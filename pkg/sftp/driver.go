@@ -54,6 +54,7 @@ func (d *driver) Create(r *volume.CreateRequest) (err error) {
 
 	var container, dir, host string
 	var port uint16
+	var readOnly bool
 	for key, val := range r.Options {
 		switch key {
 		case "container":
@@ -67,6 +68,11 @@ func (d *driver) Create(r *volume.CreateRequest) (err error) {
 				return fmt.Errorf("port must be an unsigned integer between 1 and 65535")
 			} else {
 				port = uint16(pv)
+			}
+		case "ro":
+			readOnly, err = strconv.ParseBool(val)
+			if err != nil {
+				return fmt.Errorf("ro must be a boolean")
 			}
 		default:
 			return fmt.Errorf("illegal option %q", key)
@@ -88,7 +94,7 @@ func (d *driver) Create(r *volume.CreateRequest) (err error) {
 	}
 	d.lock.Lock()
 	defer d.lock.Unlock()
-	m, err := d.getRemoteMount(host, port)
+	m, err := d.getRemoteMount(host, port, readOnly)
 	if err != nil {
 		return err
 	}
@@ -232,13 +238,20 @@ func (d *driver) Capabilities() *volume.CapabilitiesResponse {
 	return &volume.CapabilitiesResponse{Capabilities: volume.Capability{Scope: "local"}}
 }
 
-func (d *driver) getRemoteMount(host string, port uint16) (*mount, error) {
+func (d *driver) getRemoteMount(host string, port uint16, readOnly bool) (*mount, error) {
 	ps := strconv.Itoa(int(port))
 	key := net.JoinHostPort(host, ps)
 	if m, ok := d.remoteMounts[key]; ok {
-		return m, nil
+		if m.readOnly == readOnly {
+			return m, nil
+		}
+		if m.readOnly {
+			return nil, fmt.Errorf("writable access requested for read-only %s", key)
+		}
+		// Can't let a writable volume pose as read-only
+		return nil, fmt.Errorf("read-only access requested writeable %s", key)
 	}
-	m := newMount(filepath.Join(d.volumePath, host, ps), host, port, func() {
+	m := newMount(filepath.Join(d.volumePath, host, ps), host, port, readOnly, func() {
 		d.lock.Lock()
 		delete(d.remoteMounts, key)
 		d.lock.Unlock()
