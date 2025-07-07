@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"sync/atomic"
@@ -12,9 +11,8 @@ import (
 	"time"
 
 	"github.com/docker/go-plugins-helpers/volume"
+	log "github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
-
-	"github.com/datawire/docker-volume-telemount/pkg/log"
 )
 
 // mount is shared between volumeMounts.
@@ -108,13 +106,10 @@ func (m *mount) mountVolume() error {
 		sshfsArgs = append(sshfsArgs, "-o", "ro")
 	}
 
-	var sl io.Writer
-	if log.IsDebug() {
+	if log.GetLevel() >= log.DebugLevel {
 		sshfsArgs = append(sshfsArgs, "-d")
-		sl = log.Stdlog("debug")
-	} else {
-		sl = log.Stdlog("info")
 	}
+	sl := log.StandardLogger().Writer()
 	exe := "sshfs"
 	cmd := exec.Command(exe, sshfsArgs...)
 	log.Debug(cmd)
