@@ -20,11 +20,11 @@ FUSE implementations such as macFUSE or WinFSP are needed. The `sshfs` client is
 The `latest` tag is an alias for `amd64`, so if you are using that architecture, you can install it using:
 
 ```console
-$ docker plugin install datawire/telemount --alias telemount
+$ docker plugin install telepresenceio/telemount --alias telemount
 ```
 You can also install using the architecture tag (currently `amd64` or `arm64`):
 ```console
-$ docker plugin install datawire/telemount:arm64 --alias telemount
+$ docker plugin install telepresenceio/telemount:arm64 --alias telemount
 ```
 
 ### Intercept and create volumes
@@ -66,7 +66,7 @@ Start by configuring telepresence to not check for the latest version of the plu
 adding the following yaml to the `config.yml` (on Linux, this will be in `~/.config/telepresence/config.yml`, and on mac
 you'll find it in `"$HOME/Library/Application Support/telepresence/config.yml"`:
 ```yaml
-intercept:
+docker:
   telemount:
     tag: debug
 ```
@@ -78,11 +78,11 @@ $ make debug
 
 Figure out the ID of the plugin:
 ```console
-$ PLUGIN_ID=`docker plugin inspect -f='{{json .Id}}' datawire/telemount:amd64 | xargs`
+$ PLUGIN_ID=`docker plugin list --no-trunc -f capability=volumedriver -f enabled=true -q`
 ```
-and start viewing what it prints on stderr. All logging goes to stderr:
+and start viewing what it prints on /var/log/telemount.log.
 ```
-$ sudo cat /run/docker/plugins/$PLUGIN_ID/$PLUGIN_ID-stderr
+$ sudo runc --root /run/docker/runtime-runc/plugins.moby exec $(PLUGIN_ID) tail -n 400 -f /var/log/telemount.log
 ```
 
 Now connect telepresence with `--docker` and do an intercept with `--docker-run`.

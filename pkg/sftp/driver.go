@@ -11,8 +11,7 @@ import (
 	"time"
 
 	"github.com/docker/go-plugins-helpers/volume"
-
-	"github.com/datawire/docker-volume-telemount/pkg/log"
+	log "github.com/sirupsen/logrus"
 )
 
 type driver struct {
