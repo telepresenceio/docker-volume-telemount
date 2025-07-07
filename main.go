@@ -26,8 +26,9 @@ func main() {
 	}
 	logrus.SetOutput(lf)
 	if debug, ok := os.LookupEnv("DEBUG"); ok {
-		ok, _ = strconv.ParseBool(debug)
-		logrus.SetLevel(logrus.DebugLevel)
+		if ok, _ = strconv.ParseBool(debug); ok {
+			logrus.SetLevel(logrus.DebugLevel)
+		}
 	}
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
