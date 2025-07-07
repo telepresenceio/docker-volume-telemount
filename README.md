@@ -20,11 +20,11 @@ FUSE implementations such as macFUSE or WinFSP are needed. The `sshfs` client is
 The `latest` tag is an alias for `amd64`, so if you are using that architecture, you can install it using:
 
 ```console
-$ docker plugin install datawire/telemount --alias telemount
+$ docker plugin install telepresenceio/telemount --alias telemount
 ```
 You can also install using the architecture tag (currently `amd64` or `arm64`):
 ```console
-$ docker plugin install datawire/telemount:arm64 --alias telemount
+$ docker plugin install telepresenceio/telemount:arm64 --alias telemount
 ```
 
 ### Intercept and create volumes

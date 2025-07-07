@@ -1,4 +1,4 @@
-module github.com/datawire/docker-volume-telemount
+module github.com/telepresenceio/docker-volume-telemount
 
 go 1.23.0
 

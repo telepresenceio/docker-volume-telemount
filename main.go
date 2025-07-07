@@ -10,8 +10,8 @@ import (
 	"github.com/docker/go-plugins-helpers/volume"
 	"github.com/sirupsen/logrus"
 
-	"github.com/datawire/docker-volume-telemount/pkg/log"
-	"github.com/datawire/docker-volume-telemount/pkg/sftp"
+	"github.com/telepresenceio/docker-volume-telemount/pkg/log"
+	"github.com/telepresenceio/docker-volume-telemount/pkg/sftp"
 )
 
 const pluginSocket = "/run/docker/plugins/telemount.sock"
