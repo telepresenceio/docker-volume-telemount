@@ -233,14 +233,11 @@ func (m *mount) unmountVolume() (err error) {
 		}
 	}()
 	if m.mounted.Load() {
-		log.Debug("kindly asking sshfs to stop")
-		_ = m.proc.Signal(os.Interrupt)
-		select {
-		case err = <-m.done:
-		case <-time.After(5 * time.Second):
-			log.Debug("forcing sshfs to stop")
-			_ = m.proc.Kill()
+		err = exec.Command("fusermount3", "-u", m.mountPoint).Run()
+		if err != nil {
+			log.Errorf("failed to unmount mountpoint %s: %v", m.mountPoint, err)
 		}
+		_ = m.proc.Kill()
 	} else {
 		log.Debugf("sshfs on %s is not running", m.mountPoint)
 	}
