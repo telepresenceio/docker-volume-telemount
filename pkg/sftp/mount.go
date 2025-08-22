@@ -1,11 +1,14 @@
 package sftp
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -15,21 +18,28 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+const (
+	mountUndefined = iota
+	mountMounted
+	mountUnmounted
+	mountError
+)
+
 // mount is shared between volumeMounts.
-type mount struct {
+type remoteMount struct {
 	cancel     context.CancelFunc
 	mountPoint string
 	host       string
 	port       uint16
 	readOnly   bool
-	mounted    atomic.Bool
-	done       chan error
+	state      int32
 	volumes    map[string]*volumeDir
 	proc       *os.Process
 }
 
-func newMount(mountPoint, host string, port uint16, readOnly bool, cancel context.CancelFunc) *mount {
-	return &mount{
+func newRemoteMount(mountPoint, host string, port uint16, readOnly bool, cancel context.CancelFunc) *remoteMount {
+	return &remoteMount{
+		state:      mountUndefined,
 		mountPoint: mountPoint,
 		host:       host,
 		port:       port,
@@ -39,49 +49,77 @@ func newMount(mountPoint, host string, port uint16, readOnly bool, cancel contex
 	}
 }
 
-func (m *mount) String() string {
+func (m *remoteMount) String() string {
 	return fmt.Sprintf("port=%d, mountPoint=%s, readOnly=%t", m.port, m.mountPoint, m.readOnly)
 }
 
-func (m *mount) addVolume(name, dir string) {
+func (m *remoteMount) addVolume(name, dir string) {
 	m.volumes[name] = &volumeDir{
-		mount:     m,
-		remoteDir: dir,
-		createdAt: time.Now(),
+		remoteMount: m,
+		remoteDir:   dir,
+		createdAt:   time.Now(),
 	}
 }
 
-func (m *mount) getVolume(name string) (*volumeDir, bool) {
+func (m *remoteMount) getVolume(name string) (*volumeDir, bool) {
 	v, ok := m.volumes[name]
 	return v, ok
 }
 
-func (m *mount) deleteVolume(name string) error {
+func (m *remoteMount) deleteVolume(name string) {
 	delete(m.volumes, name)
-	return nil
+	if nv := len(m.volumes); nv == 0 {
+		m.unmountRemote()
+	} else {
+		log.Debugf("keeping remote mount, %d volumes are still mounted", nv)
+	}
 }
 
-func (m *mount) perhapsMount() error {
-	if m.mounted.Load() {
+func (m *remoteMount) perhapsMountRemote() error {
+	if atomic.LoadInt32(&m.state) == mountMounted {
 		return nil
 	}
-	return m.mountVolume()
-}
-
-func (m *mount) perhapsUnmount() error {
-	for _, v := range m.volumes {
-		if len(v.usedBy) > 0 {
-			return nil
-		}
-	}
-	return m.unmountVolume()
+	return m.mountRemote()
 }
 
 // telAppExports is the directory where the remote traffic-agent's SFTP server exports the
 // intercepted container's volumes.
 const telAppExports = "/tel_app_exports"
 
-func (m *mount) mountVolume() error {
+// trapConnectionLost will detect when the sshfs loses its connection. Sadly, it will just hang
+// forever when that happens, so we have to kill it.
+func trapConnectionLost(cmd *exec.Cmd, cancel context.CancelFunc) {
+	rd, wr := io.Pipe()
+	cmd.Stdout = wr
+	cmd.Stderr = wr
+	go func() {
+		rdr := bufio.NewReader(rd)
+		for {
+			line, err := rdr.ReadString('\n')
+			ll := len(line)
+			if ll > 0 {
+				if err == nil {
+					// ReadString returns err != nil if and only if the returned data does not end in delim.
+					ll--
+					if ll == 0 {
+						continue
+					}
+					line = line[:ll]
+				}
+				log.Debugf("sshfs: %s", line)
+				if strings.Contains(line, "remote host has disconnected") || strings.Contains(line, "failed to connect") {
+					// In some cases, it actually will quit gracefully, so give it some before killing it.
+					time.AfterFunc(200*time.Millisecond, cancel)
+				}
+			}
+			if err != nil {
+				break
+			}
+		}
+	}()
+}
+
+func (m *remoteMount) mountRemote() error {
 	err := os.MkdirAll(m.mountPoint, 0o777)
 	if err != nil {
 		return fmt.Errorf("failed to create mountpoint directory %s: %v", m.mountPoint, err)
@@ -106,52 +144,45 @@ func (m *mount) mountVolume() error {
 		sshfsArgs = append(sshfsArgs, "-o", "ro")
 	}
 
-	if log.GetLevel() >= log.DebugLevel {
-		sshfsArgs = append(sshfsArgs, "-d")
-	}
-	sl := log.StandardLogger().Writer()
-	exe := "sshfs"
-	cmd := exec.Command(exe, sshfsArgs...)
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(ctx, "sshfs", sshfsArgs...)
 	log.Debug(cmd)
-	cmd.Stdout = sl
-	cmd.Stderr = sl
-
-	ctx := context.Background()
 
 	// Get the current Ino and Dev of the mountPoint directory
 	st, err := statWithTimeout(ctx, m.mountPoint, 10*time.Millisecond)
+	if err != nil {
+		cancel()
+		return fmt.Errorf("failed to stat mount point %q: %v", m.mountPoint, err)
+	}
 
 	// Die if this process dies
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	log.Debugf("mounting %s", m)
-	m.mounted.Store(true)
+	log.Debugf("creating %s", m)
 	if err := cmd.Start(); err != nil {
-		m.mounted.Store(false)
+		atomic.StoreInt32(&m.state, mountError)
+		cancel()
 		return fmt.Errorf("failed to start sshfs to mount %s: %w", m.mountPoint, err)
 	}
+	trapConnectionLost(cmd, cancel)
 	m.proc = cmd.Process
 
-	m.done = make(chan error, 2)
-	starting := atomic.Bool{}
-	starting.Store(true)
-	go m.sshfsWait(cmd, &starting)
+	sshfsDone := make(chan error, 2)
+	go m.sshfsWait(cmd, sshfsDone)
 
-	err = m.detectSshfsStarted(ctx, st)
-	if starting.Swap(false) {
-		if err != nil {
-			m.done <- err
-			_ = m.proc.Kill()
-		}
+	err = m.detectSshfsStarted(ctx, st, sshfsDone)
+	if err != nil {
+		atomic.StoreInt32(&m.state, mountError)
+		_ = m.proc.Kill()
+		return err
 	}
-	return err
+	atomic.StoreInt32(&m.state, mountMounted)
+	return nil
 }
 
-func (m *mount) sshfsWait(cmd *exec.Cmd, starting *atomic.Bool) {
-	defer close(m.done)
+func (m *remoteMount) sshfsWait(cmd *exec.Cmd, sshfsDone chan<- error) {
 	err := cmd.Wait()
 	m.cancel()
-	m.mounted.Store(false)
 	if err != nil {
 		var ex *exec.ExitError
 		if errors.As(err, &ex) {
@@ -163,24 +194,17 @@ func (m *mount) sshfsWait(cmd *exec.Cmd, starting *atomic.Bool) {
 	} else {
 		log.Debug("sshfs exited normally")
 	}
-
-	// Restore to unmounted state
-	if starting.Swap(false) {
-		if err != nil {
-			m.done <- err
-		}
-	}
+	sshfsDone <- err
 }
 
-func (m *mount) detectSshfsStarted(ctx context.Context, st *unix.Stat_t) error {
+func (m *remoteMount) detectSshfsStarted(ctx context.Context, st *unix.Stat_t, sshfsDone <-chan error) error {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 
 	ticker := time.NewTicker(500 * time.Millisecond)
 	for {
 		select {
-		case err := <-m.done:
-			// sshfs command failed
+		case err := <-sshfsDone:
 			return err
 		case <-ctx.Done():
 			err := ctx.Err()
@@ -226,25 +250,22 @@ func statWithTimeout(ctx context.Context, path string, timeout time.Duration) (*
 	}
 }
 
-func (m *mount) unmountVolume() (err error) {
+func (m *remoteMount) unmountRemote() {
 	defer func() {
 		if err := os.RemoveAll(m.mountPoint); err != nil {
 			log.Errorf("failed to remove mountpoint %s: %v", m.mountPoint, err)
 		}
 	}()
-	if m.mounted.Load() {
-		err = exec.Command("fusermount3", "-u", m.mountPoint).Run()
-		if err != nil {
-			log.Errorf("failed to unmount mountpoint %s: %v", m.mountPoint, err)
-		}
+	if atomic.CompareAndSwapInt32(&m.state, mountMounted, mountUnmounted) {
+		log.Debugf("unmounting %s with fusermount3 -u and killing sshfs", m)
+		_ = exec.Command("fusermount3", "-u", m.mountPoint).Run()
 		_ = m.proc.Kill()
 	} else {
 		log.Debugf("sshfs on %s is not running", m.mountPoint)
 	}
-	return err
 }
 
-func (m *mount) appendVolumes(vols []*volume.Volume) []*volume.Volume {
+func (m *remoteMount) appendVolumes(vols []*volume.Volume) []*volume.Volume {
 	for k, v := range m.volumes {
 		vols = append(vols, v.asVolume(k))
 	}

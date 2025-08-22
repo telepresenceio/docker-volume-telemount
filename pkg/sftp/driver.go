@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/docker/go-plugins-helpers/volume"
@@ -18,7 +20,8 @@ type driver struct {
 	// All access to the driver is synchronized using this lock
 	lock         sync.RWMutex
 	volumePath   string
-	remoteMounts map[string]*mount
+	remoteMounts map[string]*remoteMount
+	unmounted    map[string]*remoteMount
 }
 
 func logResponse(err error, format string, args ...any) {
@@ -36,7 +39,8 @@ func NewDriver() volume.Driver {
 	volumePath := filepath.Join("/mnt", "volumes")
 	d := &driver{
 		volumePath:   volumePath,
-		remoteMounts: make(map[string]*mount),
+		remoteMounts: make(map[string]*remoteMount),
+		unmounted:    make(map[string]*remoteMount),
 	}
 	return d
 }
@@ -116,7 +120,7 @@ func (d *driver) Remove(r *volume.RemoveRequest) (err error) {
 	if len(v.usedBy) > 0 {
 		err = fmt.Errorf("volume %s is mounted by containers: %v", r.Name, v.usedBy)
 	} else {
-		err = v.deleteVolume(r.Name)
+		v.deleteVolume(r.Name)
 	}
 	return err
 }
@@ -182,26 +186,10 @@ func (d *driver) Unmount(r *volume.UnmountRequest) (err error) {
 	if v == nil {
 		return nil
 	}
-	found := false
-	for i, id := range v.usedBy {
-		if id == r.ID {
-			found = true
-			last := len(v.usedBy) - 1
-			if last > 0 {
-				v.usedBy[i] = v.usedBy[last]
-				v.usedBy = v.usedBy[:last]
-			} else {
-				v.usedBy = nil
-			}
-			break
-		}
-	}
-	if !found {
-		return fmt.Errorf("container %s has no mount for volume %s", r.ID, r.Name)
-	}
-	if len(v.usedBy) == 0 {
-		return v.perhapsUnmount()
-	}
+	v.mounted.Store(false)
+	v.usedBy = slices.DeleteFunc(v.usedBy, func(id string) bool {
+		return id == r.ID
+	})
 	return nil
 }
 
@@ -225,6 +213,9 @@ func (d *driver) List() (*volume.ListResponse, error) {
 	for _, m := range d.remoteMounts {
 		vols = m.appendVolumes(vols)
 	}
+	for _, m := range d.unmounted {
+		vols = m.appendVolumes(vols)
+	}
 	d.lock.RUnlock()
 	sort.Slice(vols, func(i, j int) bool {
 		return vols[i].Name < vols[j].Name
@@ -237,7 +228,7 @@ func (d *driver) Capabilities() *volume.CapabilitiesResponse {
 	return &volume.CapabilitiesResponse{Capabilities: volume.Capability{Scope: "local"}}
 }
 
-func (d *driver) getRemoteMount(host string, port uint16, readOnly bool) (*mount, error) {
+func (d *driver) getRemoteMount(host string, port uint16, readOnly bool) (*remoteMount, error) {
 	ps := strconv.Itoa(int(port))
 	key := net.JoinHostPort(host, ps)
 	if m, ok := d.remoteMounts[key]; ok {
@@ -250,35 +241,79 @@ func (d *driver) getRemoteMount(host string, port uint16, readOnly bool) (*mount
 		// Can't let a writable volume pose as read-only
 		return nil, fmt.Errorf("read-only access requested writeable %s", key)
 	}
-	m := newMount(filepath.Join(d.volumePath, host, ps), host, port, readOnly, func() {
+	m := newRemoteMount(filepath.Join(d.volumePath, host, ps), host, port, readOnly, func() {
 		d.lock.Lock()
-		delete(d.remoteMounts, key)
+		if rm, ok := d.remoteMounts[key]; ok {
+			if atomic.LoadInt32(&rm.state) == mountMounted {
+				// Unmounted as a consequence of a broken connection to the remote host.
+				// Docker isn't aware of this and might try to mount the volume again at a time when
+				// the remote host is available.
+				d.unmounted[key] = rm
+			} else {
+				delete(d.unmounted, key)
+			}
+			delete(d.remoteMounts, key)
+		}
 		d.lock.Unlock()
 	})
-	if err := m.mountVolume(); err != nil {
+	if err := m.mountRemote(); err != nil {
 		return nil, err
 	}
 	d.remoteMounts[key] = m
 	return m, nil
 }
 
-func (d *driver) getVolume(n string) (*volumeDir, error) {
+func (d *driver) getVolume(n string) (v *volumeDir, err error) {
+	var ok bool
 	for _, m := range d.remoteMounts {
-		if v, ok := m.getVolume(n); ok {
+		if v, ok = m.getVolume(n); ok {
+			return v, nil
+		}
+	}
+	for _, um := range d.unmounted {
+		if v, ok = um.getVolume(n); ok {
 			return v, nil
 		}
 	}
 	return nil, fmt.Errorf("no such volume: %q", n)
 }
 
-func (d *driver) getMountedVolume(n string) (*volumeDir, error) {
+func (d *driver) getMountedVolume(n string) (v *volumeDir, err error) {
+	defer func() {
+		if err == nil {
+			// Since we now have a properly mounted volume, we can remove any saved unmounted mounts
+			// for that volume.
+			for k, um := range d.unmounted {
+				if _, ok := um.getVolume(n); ok {
+					delete(d.unmounted, k)
+				}
+			}
+		}
+	}()
+	var ok bool
 	for _, m := range d.remoteMounts {
-		if v, ok := m.getVolume(n); ok {
-			if err := m.perhapsMount(); err != nil {
+		if v, ok = m.getVolume(n); ok {
+			if err = m.perhapsMountRemote(); err != nil {
 				return v, err
 			}
-			v.mount = m
+			v.remoteMount = m
 			return v, nil
+		}
+	}
+	for k, um := range d.unmounted {
+		if v, ok = um.getVolume(n); ok {
+			log.Debugf("Remount previously mounted remote volume %s[%s] == %s", um, n, v.logicalMountPoint())
+			var m *remoteMount
+			m, err = d.getRemoteMount(um.host, um.port, um.readOnly)
+			if err != nil {
+				// That failed, so never try this unmounted mount again.
+				delete(d.unmounted, k)
+				return nil, err
+			}
+			m.volumes = um.volumes
+			if v, ok = m.getVolume(n); ok {
+				return v, nil
+			}
 		}
 	}
 	return nil, fmt.Errorf("no such volume: %q", n)
