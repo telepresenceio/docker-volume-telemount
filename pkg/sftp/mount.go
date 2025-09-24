@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -271,4 +273,13 @@ func (m *remoteMount) appendVolumes(vols []*volume.Volume) []*volume.Volume {
 		vols = append(vols, v.asVolume(k))
 	}
 	return vols
+}
+
+func (m *remoteMount) pingHost(timeout time.Duration) error {
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(m.host, strconv.Itoa(int(m.port))), timeout)
+	if err != nil {
+		return err
+	}
+	_ = conn.Close()
+	return nil
 }

@@ -12,6 +12,20 @@
         "value"
       ],
       "value": "false"
+    },
+    {
+      "name": "DISCONNECTED_LINGER_TIME",
+      "settable": [
+        "value"
+      ],
+      "value": "5s"
+    },
+    {
+      "name": "HOST_PING_TIMEOUT",
+      "settable": [
+        "value"
+      ],
+      "value": "1s"
     }
   ],
   "interface": {

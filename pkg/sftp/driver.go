@@ -3,6 +3,7 @@ package sftp
 import (
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -18,9 +19,11 @@ import (
 
 type driver struct {
 	// All access to the driver is synchronized using this lock
-	lock         sync.RWMutex
-	volumePath   string
-	remoteMounts map[string]*remoteMount
+	lock                   sync.RWMutex
+	volumePath             string
+	remoteMounts           map[string]*remoteMount
+	disconnectedLingerTime time.Duration
+	hostPingTimeout        time.Duration
 }
 
 func logResponse(err error, format string, args ...any) {
@@ -29,6 +32,20 @@ func logResponse(err error, format string, args ...any) {
 	} else {
 		log.Errorf(format+": %v", append(args, err)...)
 	}
+}
+
+const (
+	defaultDisconnectedLingerTime = 5 * time.Second
+	defaultHostPingTimeout        = 1 * time.Second
+)
+
+func durationEnv(env string, d time.Duration) time.Duration {
+	if v, ok := os.LookupEnv(env); ok {
+		if dv, err := time.ParseDuration(v); err == nil {
+			return dv
+		}
+	}
+	return d
 }
 
 // NewDriver creates a new driver that will mount volumes under /mnt/volumes (which is
@@ -40,6 +57,8 @@ func NewDriver() volume.Driver {
 		volumePath:   volumePath,
 		remoteMounts: make(map[string]*remoteMount),
 	}
+	d.disconnectedLingerTime = durationEnv("DISCONNECTED_LINGER_TIME", defaultDisconnectedLingerTime)
+	d.hostPingTimeout = durationEnv("HOST_PING_TIMEOUT", defaultHostPingTimeout)
 	return d
 }
 
@@ -241,7 +260,16 @@ func (d *driver) getRemoteMount(host string, port uint16, readOnly bool) (*remot
 		// of a broken connection to the remote host, and we must keep the entry.
 		// Docker isn't aware of the broken connection and might try to mount the volume again at
 		// a time when the remote host is available.
-		if !atomic.CompareAndSwapInt32(&m.state, mountMounted, mountDisconnected) {
+		if atomic.CompareAndSwapInt32(&m.state, mountMounted, mountDisconnected) {
+			time.AfterFunc(d.disconnectedLingerTime, func() {
+				d.lock.Lock()
+				if m, ok := d.remoteMounts[key]; ok && atomic.LoadInt32(&m.state) == mountDisconnected && m.pingHost(d.hostPingTimeout) != nil {
+					log.Debugf("Removing disconnected remote mount %s", m)
+					delete(d.remoteMounts, key)
+				}
+				d.lock.Unlock()
+			})
+		} else {
 			d.lock.Lock()
 			delete(d.remoteMounts, key)
 			d.lock.Unlock()
@@ -277,9 +305,15 @@ func (d *driver) getMountedVolume(n string) (v *volumeDir, err error) {
 			return v, nil
 		}
 	}
-	for _, um := range d.remoteMounts {
+	for key, um := range d.remoteMounts {
 		if v, ok = um.getVolume(n); ok && atomic.LoadInt32(&um.state) == mountDisconnected {
 			log.Debugf("Remount previously mounted remote volume %s[%s] == %s", um, n, v.logicalMountPoint())
+			// Try dialing the host again with a short timeout. If it fails, then well just assume the remote is gone permanently.
+			if err = um.pingHost(d.hostPingTimeout); err != nil {
+				log.Debugf("Dropping previously mounted remote volume %s because the host is not responding.", um)
+				delete(d.remoteMounts, key)
+				break
+			}
 			var m *remoteMount
 			m, err = d.getRemoteMount(um.host, um.port, um.readOnly)
 			if err != nil {
