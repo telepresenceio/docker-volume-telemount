@@ -255,7 +255,7 @@ func (d *driver) getRemoteMount(host string, port uint16, readOnly bool) (*remot
 		// Can't let a writable volume pose as read-only
 		return nil, fmt.Errorf("read-only access requested writeable %s", key)
 	}
-	m := newRemoteMount(filepath.Join(d.volumePath, host, ps), host, port, readOnly, func(m *remoteMount) {
+	m := newRemoteMount(filepath.Join(d.volumePath, safeName(host), ps), host, port, readOnly, func(m *remoteMount) {
 		// If the remote volume's state is `mountMounted` here, then it was unmounted as a consequence
 		// of a broken connection to the remote host, and we must keep the entry.
 		// Docker isn't aware of the broken connection and might try to mount the volume again at
@@ -282,6 +282,26 @@ func (d *driver) getRemoteMount(host string, port uint16, readOnly bool) (*remot
 	}
 	d.remoteMounts[key] = m
 	return m, nil
+}
+
+// safeName returns a string that can safely be used as a file name or docker container. Only
+// characters [a-zA-Z0-9][a-zA-Z0-9_.-] are allowed. Others are replaced by an underscore, or
+// if it's the very first character, by the character 'a'.
+func safeName(name string) string {
+	n := strings.Builder{}
+	for i, c := range name {
+		switch {
+		case (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'):
+			n.WriteByte(byte(c))
+		case i > 0 && (c == '_' || c == '.' || c == '-'):
+			n.WriteByte(byte(c))
+		case i > 0:
+			n.WriteByte('_')
+		default:
+			n.WriteByte('a')
+		}
+	}
+	return n.String()
 }
 
 func (d *driver) getVolume(n string) (v *volumeDir, err error) {

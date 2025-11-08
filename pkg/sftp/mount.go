@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"strconv"
@@ -127,16 +128,22 @@ func (m *remoteMount) mountRemote() error {
 	if err != nil {
 		return fmt.Errorf("failed to create mountpoint directory %s: %v", m.mountPoint, err)
 	}
+	ip, err := netip.ParseAddr(m.host)
+	if err != nil {
+		return fmt.Errorf("failed to parse host address %s: %v", m.host, err)
+	}
+	ap := netip.AddrPortFrom(ip, m.port)
+
+	useIPv6 := ip.Is6()
 	sshfsArgs := []string{
-		fmt.Sprintf("%s:%s", m.host, telAppExports), // what to mount
-		m.mountPoint, // where to mount it
 		"-F", "none", // don't load the user's config file
-		"-f",
+		"-f", // don't fork',
+
 		// connection settings
 		"-C", // compression
 		"-o", "ConnectTimeout=10",
+
 		"-o", "ServerAliveInterval=5",
-		"-o", fmt.Sprintf("directport=%d", m.port),
 
 		// mount directives
 		"-o", "follow_symlinks",
@@ -145,6 +152,23 @@ func (m *remoteMount) mountRemote() error {
 	}
 	if m.readOnly {
 		sshfsArgs = append(sshfsArgs, "-o", "ro")
+	}
+
+	if useIPv6 {
+		// Must use stdin/stdout because sshfs is not capable of connecting with IPv6
+		// when using "-o directport=<port>".
+		// See https://github.com/libfuse/sshfs/issues/335
+		sshfsArgs = append(sshfsArgs,
+			"-o", "slave",
+			fmt.Sprintf("localhost:%s", telAppExports),
+			m.mountPoint, // where to mount it
+		)
+	} else {
+		sshfsArgs = append(sshfsArgs,
+			"-o", fmt.Sprintf("directport=%d", ap.Port()),
+			fmt.Sprintf("%s:%s", ap.Addr().String(), telAppExports), // what to mount
+			m.mountPoint,                                            // where to mount it
+		)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -161,17 +185,35 @@ func (m *remoteMount) mountRemote() error {
 	// Die if this process dies
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
+	var conn net.Conn
+	if useIPv6 {
+		conn, err = net.DialTimeout("tcp", ap.String(), 5*time.Second)
+		if err != nil {
+			cancel()
+			return fmt.Errorf("failed to connect to sftp server at %s: %v", ap, err)
+		}
+		cmd.Stdin = conn
+		cmd.Stdout = conn
+	}
 	log.Debugf("creating %s", m)
-	if err := cmd.Start(); err != nil {
+	if err = cmd.Start(); err != nil {
 		atomic.StoreInt32(&m.state, mountError)
 		cancel()
+		if conn != nil {
+			_ = conn.Close()
+		}
 		return fmt.Errorf("failed to start sshfs to mount %s: %w", m.mountPoint, err)
 	}
 	trapConnectionLost(cmd, cancel)
 	m.proc = cmd.Process
 
 	sshfsDone := make(chan error, 2)
-	go m.sshfsWait(cmd, sshfsDone)
+	go func() {
+		m.sshfsWait(cmd, sshfsDone)
+		if conn != nil {
+			_ = conn.Close()
+		}
+	}()
 
 	err = m.detectSshfsStarted(ctx, st, sshfsDone)
 	if err != nil {
